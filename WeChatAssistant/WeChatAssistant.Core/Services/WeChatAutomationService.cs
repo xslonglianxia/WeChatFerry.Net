@@ -32,10 +32,15 @@ public class WeChatAutomationService : IDisposable
     #region 常量定义
 
     /// <summary>
-    /// 微信主窗口的窗口类名
-    /// 用于通过类名查找微信窗口
+    /// 微信主窗口可能的窗口类名列表
+    /// 不同版本的微信可能使用不同的类名
     /// </summary>
-    private readonly string _wechatClassName = "WeChatMainWndForPC";
+    private readonly string[] _wechatClassNames = new[]
+    {
+        "WeChatMainWndForPC",      // 最常见的类名
+        "WeChatMainWndClass",       // 某些版本使用
+        "WeChatLoginWndForPC"       // 登录窗口
+    };
 
     /// <summary>
     /// 微信进程名称
@@ -375,18 +380,22 @@ public class WeChatAutomationService : IDisposable
 
                 Log($"DEBUG", $"FlaUI 查找尝试 {i + 1}/{maxRetries}...");
 
-                try
+                // 尝试所有可能的类名
+                foreach (var className in _wechatClassNames)
                 {
-                    var window = desktop.FindFirstChild(cf => cf.ByClassName(_wechatClassName))?.AsWindow();
-                    if (window != null)
+                    try
                     {
-                        Log("INFO", $"FlaUI 找到窗口");
-                        return window;
+                        var window = desktop.FindFirstChild(cf => cf.ByClassName(className))?.AsWindow();
+                        if (window != null)
+                        {
+                            Log("INFO", $"FlaUI 找到窗口，类名: {className}");
+                            return window;
+                        }
                     }
-                }
-                catch (Exception ex)
-                {
-                    Log($"DEBUG", $"FlaUI 查找异常: {ex.Message}");
+                    catch (Exception ex)
+                    {
+                        Log($"DEBUG", $"FlaUI 查找类名 {className} 异常: {ex.Message}");
+                    }
                 }
 
                 // 等待后重试
