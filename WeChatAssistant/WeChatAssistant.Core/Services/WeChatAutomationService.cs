@@ -4,6 +4,7 @@ using FlaUI.Core.Definitions;
 using FlaUI.Core.Input;
 using FlaUI.Core.Tools;
 using FlaUI.UIA3;
+using System.Windows.Forms;
 using WeChatAssistant.Core.Events;
 using WeChatAssistant.Core.Models;
 
@@ -627,13 +628,35 @@ public class WeChatAutomationService : IDisposable
             Thread.Sleep(100);
             
             // 清空现有内容（Ctrl+A全选）
-            Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_A);
-            Thread.Sleep(50);
-            
-            // 通过剪贴板粘贴内容（支持中文和特殊字符）
-            Clipboard.SetText(message);
-            Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_V);
-            Thread.Sleep(200);
+                Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_A);
+                Thread.Sleep(50);
+                
+                // 保存原始剪贴板内容
+                IDataObject? originalClipboard = null;
+                try
+                {
+                    if (Clipboard.ContainsData(DataFormats.Text))
+                        originalClipboard = Clipboard.GetDataObject();
+                }
+                catch { } // 忽略剪贴板读取错误
+                
+                try
+                {
+                    // 通过剪贴板粘贴内容（支持中文和特殊字符）
+                    Clipboard.SetText(message);
+                    Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_V);
+                    Thread.Sleep(200);
+                }
+                finally
+                {
+                    // 恢复原始剪贴板内容
+                    try
+                    {
+                        if (originalClipboard != null)
+                            Clipboard.SetDataObject(originalClipboard);
+                    }
+                    catch { } // 忽略恢复时的错误
+                }
 
             // 尝试点击发送按钮
             var sendButton = FindSendButton();

@@ -281,7 +281,7 @@ public class SchedulerService : IDisposable
     /// - "分 时 * * *"：每天指定时间执行
     /// - "* * * * *"：每分钟执行
     /// - "*/N * * * *"：每N分钟执行
-    /// 
+    ///
     /// 示例：
     /// - "0 9 * * *"：每天9:00执行
     /// - "*/30 * * * *"：每30分钟执行
@@ -293,7 +293,11 @@ public class SchedulerService : IDisposable
         {
             // Cron表达式格式：分 时 日 月 周
             var parts = cronExpression.Split(' ');
-            if (parts.Length != 5) return -1;
+            if (parts.Length != 5)
+            {
+                Log("WARN", $"无效的Cron表达式格式: {cronExpression}，需要5个字段");
+                return -1;
+            }
 
             var minute = parts[0];  // 分钟字段
             var hour = parts[1];    // 小时字段
@@ -301,6 +305,7 @@ public class SchedulerService : IDisposable
             // 情况1：每分钟执行 "* * * * *"
             if (minute == "*" && hour == "*")
             {
+                Log("DEBUG", "Cron表达式解析为每分钟执行");
                 return TimeSpan.FromMinutes(1).TotalMilliseconds;
             }
 
@@ -309,6 +314,12 @@ public class SchedulerService : IDisposable
             {
                 if (int.TryParse(minute.Substring(2), out var interval))
                 {
+                    if (interval <= 0 || interval > 60)
+                    {
+                        Log("WARN", $"Cron表达式中的分钟间隔无效: {interval}，必须在1-60之间");
+                        return -1;
+                    }
+                    Log("DEBUG", $"Cron表达式解析为每{interval}分钟执行");
                     return TimeSpan.FromMinutes(interval).TotalMilliseconds;
                 }
             }
@@ -318,16 +329,23 @@ public class SchedulerService : IDisposable
             {
                 if (int.TryParse(minute, out var min) && int.TryParse(hour, out var hr))
                 {
+                    if (min < 0 || min > 59 || hr < 0 || hr > 23)
+                    {
+                        Log("WARN", $"Cron表达式中的时间无效: {hr}:{min}");
+                        return -1;
+                    }
+
                     var now = DateTime.Now;
                     // 计算下次执行时间
                     var nextRun = new DateTime(now.Year, now.Month, now.Day, hr, min, 0);
-                    
+
                     // 如果今天的时间已过，设置为明天
                     if (nextRun <= now)
                     {
                         nextRun = nextRun.AddDays(1);
                     }
-                    
+
+                    Log("DEBUG", $"Cron表达式解析为每天{hr:D2}:{min:D2}执行，下次执行时间: {nextRun:yyyy-MM-dd HH:mm:ss}");
                     // 返回距离下次执行的毫秒数
                     return (nextRun - now).TotalMilliseconds;
                 }
@@ -338,15 +356,18 @@ public class SchedulerService : IDisposable
             {
                 if (int.TryParse(minute, out var minInterval))
                 {
+                    Log("DEBUG", $"Cron表达式解析为每小时第{minInterval}分钟执行");
                     return TimeSpan.FromMinutes(minInterval).TotalMilliseconds;
                 }
             }
 
+            Log("WARN", $"无法解析的Cron表达式: {cronExpression}，使用默认每小时执行");
             // 默认：每小时执行
             return TimeSpan.FromHours(1).TotalMilliseconds;
         }
-        catch
+        catch (Exception ex)
         {
+            Log("ERROR", $"解析Cron表达式时出错: {ex.Message}");
             return -1;
         }
     }

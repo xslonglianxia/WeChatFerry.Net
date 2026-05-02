@@ -622,6 +622,28 @@ public partial class MainForm : Form
         var logMessage = $"[{e.Time:HH:mm:ss}] [{e.Level}] {e.Message}";
         _txtLog.AppendText(logMessage + Environment.NewLine);
         _txtLog.ScrollToCaret();  // 滚动到最新日志
+
+        // 限制日志行数，防止内存占用过高
+        TrimLogIfNeeded();
+    }
+
+    /// <summary>
+    /// 如果日志行数超过限制，则删除旧日志
+    /// </summary>
+    private void TrimLogIfNeeded()
+    {
+        const int maxLogLines = 2000; // 最大保留2000行日志
+        const int trimThreshold = 2200; // 超过2200行时开始清理
+        
+        var lines = _txtLog.Lines;
+        if (lines.Length >= trimThreshold)
+        {
+            // 删除前200行，保留最新的2000行
+            var newLines = lines.Skip(lines.Length - maxLogLines).ToArray();
+            _txtLog.Lines = newLines;
+            _txtLog.SelectionStart = _txtLog.Text.Length;
+            _txtLog.ScrollToCaret();
+        }
     }
 
     /// <summary>

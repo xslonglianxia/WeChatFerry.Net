@@ -199,19 +199,40 @@ public class DatabaseService : IDisposable
 
     /// <summary>
     /// 批量保存消息
-    /// 逐条插入，自动去重
+    /// 使用事务提高性能，自动去重
     /// </summary>
     /// <param name="messages">要保存的消息集合</param>
     /// <returns>实际新插入的消息数量（排除重复）</returns>
     public int SaveMessages(IEnumerable<ChatMessage> messages)
     {
+        if (_connection == null) return 0;
+
         int count = 0;
-        foreach (var msg in messages)
+        var messageList = messages.ToList();
+        
+        // 使用事务批量插入
+        using var transaction = _connection.BeginTransaction();
+        try
         {
-            // 只有成功插入才计数
-            if (SaveMessage(msg) > 0)
-                count++;
+            foreach (var msg in messageList)
+            {
+                if (SaveMessage(msg) > 0)
+                    count++;
+            }
+            transaction.Commit();
         }
+        catch
+        {
+            transaction.Rollback();
+            // 回退到逐行插入模式
+            count = 0;
+            foreach (var msg in messageList)
+            {
+                if (SaveMessage(msg) > 0)
+                    count++;
+            }
+        }
+        
         return count;
     }
 
