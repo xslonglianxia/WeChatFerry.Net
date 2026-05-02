@@ -25,6 +25,7 @@ namespace WeChatAssistant.Core.Services;
 /// - 需要微信PC客户端已启动并登录
 /// - 微信窗口需要可见（部分操作需要窗口前台）
 /// - 微信版本更新可能导致控件定位失效
+/// - 必须使用 STA 线程模式
 /// </remarks>
 public class WeChatAutomationService : IDisposable
 {
@@ -41,6 +42,11 @@ public class WeChatAutomationService : IDisposable
     /// 用于检测微信是否运行
     /// </summary>
     private readonly string _wechatProcessName = "WeChat";
+
+    /// <summary>
+    /// 查找窗口超时时间（毫秒）
+    /// </summary>
+    private const int FindWindowTimeoutMs = 5000;
 
     #endregion
 
@@ -120,16 +126,26 @@ public class WeChatAutomationService : IDisposable
     {
         try
         {
+            // 检查线程 Apartment 状态
+            if (Thread.CurrentThread.GetApartmentState() != ApartmentState.STA)
+            {
+                Log("WARN", "当前线程不是 STA 模式，这可能导致 UI Automation 无法正常工作");
+                Log("INFO", "建议使用 STA 线程或在主线程中调用此服务");
+            }
+
             // 创建UIA3自动化实例
             _automation = new UIA3Automation();
             
-            // 配置控件查找超时时间（2秒）
+            // 配置控件查找超时时间（3秒）
             // 超时过短可能导致查找失败，过长影响响应速度
-            _automation.Configuration.TransitionTimeout = TimeSpan.FromSeconds(2);
+            _automation.Configuration.TransitionTimeout = TimeSpan.FromSeconds(3);
             
             // 配置元素等待超时时间（5秒）
             // 用于等待动态加载的UI元素
             _automation.Configuration.WaitForElementTimeout = TimeSpan.FromSeconds(5);
+            
+            // 配置查找失败时不抛出异常
+            _automation.Configuration.AlwaysTryFindChildren = false;
             
             _isInitialized = true;
             Log("INFO", "UI自动化服务初始化成功");
@@ -155,9 +171,10 @@ public class WeChatAutomationService : IDisposable
     /// </returns>
     /// <remarks>
     /// 连接流程：
-    /// 1. 首先通过窗口类名直接查找
-    /// 2. 如果找不到，检查微信进程是否存在
-    /// 3. 如果进程存在但窗口找不到，等待1秒后重试
+    /// 1. 首先检查线程 Apartment 状态
+    /// 2. 检查微信进程是否存在
+    /// 3. 使用多策略查找窗口
+    /// 4. 带超时控制，避免无限等待
     /// </remarks>
     public bool ConnectToWeChat()
     {
@@ -170,50 +187,221 @@ public class WeChatAutomationService : IDisposable
 
         try
         {
-            // 获取桌面根元素，所有窗口都是桌面的子元素
-            var desktop = _automation.GetDesktop();
-            
-            // 方法1：通过窗口类名直接查找微信窗口
-            // 这是最可靠的方式，因为类名通常不会改变
-            _wechatWindow = desktop.FindFirstChild(cf => cf.ByClassName(_wechatClassName))
-                ?.AsWindow();
+            Log("INFO", "开始连接微信窗口...");
+            var startTime = DateTime.Now;
 
-            // 如果直接查找失败，尝试通过进程查找
-            if (_wechatWindow == null)
+            // 首先检查微信进程是否存在
+            var processes = System.Diagnostics.Process.GetProcessesByName(_wechatProcessName);
+            if (processes.Length == 0)
             {
-                // 检查微信进程是否存在
-                var processes = System.Diagnostics.Process.GetProcessesByName(_wechatProcessName);
-                if (processes.Length > 0)
-                {
-                    Log("INFO", "检测到微信进程，尝试连接窗口...");
-                    
-                    // 进程存在但窗口未找到，可能是窗口正在创建
-                    // 等待1秒让窗口完全初始化
-                    Thread.Sleep(1000);
-                    
-                    // 重新尝试查找窗口
-                    _wechatWindow = desktop.FindFirstChild(cf => cf.ByClassName(_wechatClassName))
-                        ?.AsWindow();
-                }
+                Log("WARN", "未找到微信进程，请确保微信PC客户端已启动");
+                return false;
             }
+
+            Log("INFO", $"检测到微信进程 (PID: {processes[0].Id})");
+
+            // 尝试多种方法查找窗口
+            _wechatWindow = TryFindWindowWithStrategies(processes[0]);
 
             // 检查连接结果
             if (_wechatWindow != null)
             {
-                Log("INFO", "成功连接到微信窗口");
+                var elapsed = (DateTime.Now - startTime).TotalMilliseconds;
+                Log("INFO", $"成功连接到微信窗口 (耗时: {elapsed:F0}ms)");
+                
+                // 验证窗口是否有效
+                if (_wechatWindow.IsOffscreen)
+                {
+                    Log("WARN", "微信窗口不可见，可能被最小化或隐藏");
+                }
+                
                 // 触发状态变更事件
                 OnStatusChanged?.Invoke(this, new StatusEventArgs { Status = "已连接", IsRunning = true });
                 return true;
             }
 
-            // 连接失败，提示用户启动微信
-            Log("WARN", "未找到微信窗口，请确保微信PC客户端已启动");
+            // 所有方法都失败
+            Log("WARN", "未找到微信窗口，请确保微信PC客户端已启动并可见");
             return false;
         }
         catch (Exception ex)
         {
             Log("ERROR", $"连接微信失败: {ex.Message}");
+            Log("ERROR", $"异常类型: {ex.GetType().Name}");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// 使用多种策略查找窗口
+    /// </summary>
+    private Window? TryFindWindowWithStrategies(System.Diagnostics.Process process)
+    {
+        // 策略1：使用原生 Windows API 直接查找
+        Log("INFO", "策略1: 使用原生 Windows API 查找...");
+        var window = FindWindowByNativeApi();
+        if (window != null) return window;
+
+        // 策略2：使用进程主窗口句柄
+        if (process.MainWindowHandle != IntPtr.Zero)
+        {
+            Log("INFO", $"策略2: 使用进程主窗口句柄 (0x{process.MainWindowHandle:X})...");
+            window = FindWindowByHandle(process.MainWindowHandle);
+            if (window != null) return window;
+        }
+
+        // 策略3：带超时的 FlaUI 查找
+        Log("INFO", $"策略3: 使用 FlaUI 带超时查找 (超时: {FindWindowTimeoutMs}ms)...");
+        window = FindWindowByFlaUIWithTimeout();
+        if (window != null) return window;
+
+        // 策略4：重试机制
+        Log("INFO", "策略4: 使用重试机制...");
+        for (int i = 0; i < 3; i++)
+        {
+            Log($"INFO", $"重试 {i + 1}/3...");
+            Thread.Sleep(1000);
+            
+            window = FindWindowByNativeApi();
+            if (window != null) return window;
+            
+            window = FindWindowByHandle(process.MainWindowHandle);
+            if (window != null) return window;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 使用原生 Windows API 查找窗口
+    /// </summary>
+    private Window? FindWindowByNativeApi()
+    {
+        try
+        {
+            IntPtr windowHandle = IntPtr.Zero;
+
+            // 定义回调函数
+            EnumWindowsDelegate callback = (hWnd, lParam) =>
+            {
+                // 检查窗口是否可见
+                if (!IsWindowVisible(hWnd))
+                    return true;
+
+                // 获取窗口类名
+                var className = new System.Text.StringBuilder(256);
+                GetClassName(hWnd, className, 256);
+
+                // 检查是否是微信窗口
+                if (className.ToString().Contains("WeChat"))
+                {
+                    windowHandle = hWnd;
+                    Log("DEBUG", $"找到微信相关窗口: {className} (0x{hWnd:X})");
+                    return false; // 停止枚举
+                }
+
+                return true; // 继续枚举
+            };
+
+            // 枚举所有窗口
+            if (!EnumWindows(callback, IntPtr.Zero))
+            {
+                if (windowHandle != IntPtr.Zero)
+                {
+                    Log("INFO", $"通过原生 API 找到窗口，句柄: 0x{windowHandle:X}");
+                    return _automation!.GetDesktop().FromHandle(windowHandle)?.AsWindow();
+                }
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Log("ERROR", $"原生 API 查找失败: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 使用窗口句柄查找窗口
+    /// </summary>
+    private Window? FindWindowByHandle(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero)
+            return null;
+
+        try
+        {
+            var element = _automation!.GetDesktop().FromHandle(handle);
+            if (element != null)
+            {
+                var window = element.AsWindow();
+                if (window != null)
+                {
+                    // 验证窗口
+                    var className = window.Properties.ClassName.ValueOrDefault;
+                    Log("INFO", $"通过句柄找到窗口，类名: {className}");
+                    return window;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log("DEBUG", $"句柄查找失败: {ex.Message}");
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 使用 FlaUI 带超时查找
+    /// </summary>
+    private Window? FindWindowByFlaUIWithTimeout()
+    {
+        try
+        {
+            var desktop = _automation!.GetDesktop();
+            var startTime = DateTime.Now;
+            var maxRetries = 5;
+
+            for (int i = 0; i < maxRetries; i++)
+            {
+                var elapsed = (DateTime.Now - startTime).TotalMilliseconds;
+                if (elapsed >= FindWindowTimeoutMs)
+                {
+                    Log("DEBUG", $"FlaUI 查找超时 ({elapsed:F0}ms)");
+                    break;
+                }
+
+                Log($"DEBUG", $"FlaUI 查找尝试 {i + 1}/{maxRetries}...");
+
+                try
+                {
+                    var window = desktop.FindFirstChild(cf => cf.ByClassName(_wechatClassName))?.AsWindow();
+                    if (window != null)
+                    {
+                        Log("INFO", $"FlaUI 找到窗口");
+                        return window;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"DEBUG", $"FlaUI 查找异常: {ex.Message}");
+                }
+
+                // 等待后重试
+                if (i < maxRetries - 1)
+                {
+                    Thread.Sleep(500);
+                }
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Log("ERROR", $"FlaUI 查找失败: {ex.Message}");
+            return null;
         }
     }
 
@@ -231,6 +419,24 @@ public class WeChatAutomationService : IDisposable
         }
         return true;
     }
+
+    #endregion
+
+    #region 原生 Windows API
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsDelegate lpEnumFunc, IntPtr lParam);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+    private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+
+    private delegate bool EnumWindowsDelegate(IntPtr hWnd, IntPtr lParam);
 
     #endregion
 
@@ -627,36 +833,36 @@ public class WeChatAutomationService : IDisposable
             inputBox.Click();
             Thread.Sleep(100);
             
-            // 清空现有内容（Ctrl+A全选）
+            // 保存原始剪贴板内容
+            IDataObject? originalClipboard = null;
+            try
+            {
+                if (Clipboard.ContainsData(DataFormats.Text))
+                    originalClipboard = Clipboard.GetDataObject();
+            }
+            catch { } // 忽略剪贴板读取错误
+            
+            try
+            {
+                // 清空现有内容（Ctrl+A全选）
                 Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_A);
                 Thread.Sleep(50);
                 
-                // 保存原始剪贴板内容
-                IDataObject? originalClipboard = null;
+                // 通过剪贴板粘贴内容（支持中文和特殊字符）
+                Clipboard.SetText(message);
+                Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_V);
+                Thread.Sleep(200);
+            }
+            finally
+            {
+                // 恢复原始剪贴板内容
                 try
                 {
-                    if (Clipboard.ContainsData(DataFormats.Text))
-                        originalClipboard = Clipboard.GetDataObject();
+                    if (originalClipboard != null)
+                        Clipboard.SetDataObject(originalClipboard);
                 }
-                catch { } // 忽略剪贴板读取错误
-                
-                try
-                {
-                    // 通过剪贴板粘贴内容（支持中文和特殊字符）
-                    Clipboard.SetText(message);
-                    Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, VirtualKeyShort.KEY_V);
-                    Thread.Sleep(200);
-                }
-                finally
-                {
-                    // 恢复原始剪贴板内容
-                    try
-                    {
-                        if (originalClipboard != null)
-                            Clipboard.SetDataObject(originalClipboard);
-                    }
-                    catch { } // 忽略恢复时的错误
-                }
+                catch { } // 忽略恢复时的错误
+            }
 
             // 尝试点击发送按钮
             var sendButton = FindSendButton();
@@ -897,12 +1103,19 @@ public class WeChatAutomationService : IDisposable
     /// <param name="message">日志消息内容</param>
     private void Log(string level, string message)
     {
-        OnLog?.Invoke(this, new LogEventArgs
+        try
         {
-            Level = level,
-            Message = message,
-            Time = DateTime.Now
-        });
+            OnLog?.Invoke(this, new LogEventArgs
+            {
+                Level = level,
+                Message = message,
+                Time = DateTime.Now
+            });
+        }
+        catch
+        {
+            // 忽略日志输出错误
+        }
     }
 
     #endregion
